@@ -1,9 +1,8 @@
 import streamlit as st
-import cv2
 import numpy as np
 import mediapipe as mp
 import random
-from PIL import Image
+from PIL import Image, ImageDraw
 import io
 
 st.set_page_config(
@@ -51,25 +50,16 @@ face_mesh = mp_face_mesh.FaceMesh(
 )
 
 # --- Landmark indices ---
-# MediaPipe Face Mesh (468 landmarks, 0-indexed)
-
-# Left eye: iris center ~468 (not always reliable), use eyelid landmarks
-# LEFT EYE top/bottom: 159 (upper), 23 (lower)
-# LEFT EYE left/right: 130 (left), 243 (right)
 LEFT_EYE_TOP = 159
 LEFT_EYE_BOTTOM = 23
 LEFT_EYE_LEFT = 130
 LEFT_EYE_RIGHT = 243
 
-# RIGHT EYE top/bottom: 386 (upper), 374 (lower)
-# RIGHT EYE left/right: 359 (right), 463 (left) — mirrored
 RIGHT_EYE_TOP = 386
 RIGHT_EYE_BOTTOM = 374
 RIGHT_EYE_LEFT = 263
 RIGHT_EYE_RIGHT = 362
 
-# UPPER LIP center: 13 (top of upper lip)
-# LOWER LIP center: 14 (bottom of lower lip)
 UPPER_LIP = 13
 LOWER_LIP = 14
 
@@ -92,7 +82,6 @@ def mouth_ratio(landmarks, h, w):
     lower = np.array([landmarks[LOWER_LIP].x * w, landmarks[LOWER_LIP].y * h])
     lip_dist = np.linalg.norm(upper - lower)
 
-    # reference: nose bridge (6) to chin (152)
     nose = np.array([landmarks[6].x * w, landmarks[6].y * h])
     chin = np.array([landmarks[152].x * w, landmarks[152].y * h])
     face_height = np.linalg.norm(nose - chin)
@@ -100,45 +89,43 @@ def mouth_ratio(landmarks, h, w):
     return lip_dist / face_height if face_height > 0 else 0
 
 
-def compute_gaga_score(image):
-    """Process image with MediaPipe and return (score, annotated_image)."""
-    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+def compute_gaga_score(pil_img):
+    """Process PIL image with MediaPipe and return (score, annotated_pil)."""
+    rgb = np.array(pil_img.convert("RGB"))
+    h, w, _ = rgb.shape
     results = face_mesh.process(rgb)
 
     if not results.multi_face_landmarks:
         return None, None
 
     landmarks = results.multi_face_landmarks[0].landmark
-    h, w, _ = image.shape
 
     # --- Eye metrics ---
     ear_left = ear(landmarks, h, w, LEFT_EYE_TOP, LEFT_EYE_BOTTOM, LEFT_EYE_LEFT, LEFT_EYE_RIGHT)
     ear_right = ear(landmarks, h, w, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM, RIGHT_EYE_LEFT, RIGHT_EYE_RIGHT)
     avg_ear = (ear_left + ear_right) / 2.0
 
-    # Typical EAR ~0.25-0.35 for open eyes, <0.20 for closed
-    # Lower EAR → more "gaga" (droopy / vacant stare)
     ear_score = max(0.0, min(1.0, 1.0 - (avg_ear / 0.30)))
     if avg_ear > 0.35:
-        ear_score = 0.05  # wide open → very alert
+        ear_score = 0.05
 
     # --- Mouth metric ---
     mratio = mouth_ratio(landmarks, h, w)
-    # Higher mratio → mouth agape → more gaga
     mouth_score = max(0.0, min(1.0, (mratio - 0.02) / 0.08))
 
     # --- Weighted combination ---
     raw = ear_score * 0.55 + mouth_score * 0.35
 
-    # --- Random factor for dynamism (±8%) ---
+    # --- Random factor ±8% ---
     jitter = random.uniform(-0.08, 0.08)
     final = max(0.0, min(1.0, raw + jitter))
 
     score_pct = round(final * 100)
 
-    # --- Draw landmarks on image ---
-    draw = image.copy()
-    h2, w2 = draw.shape[:2]
+    # --- Draw landmarks with PIL ---
+    draw_img = pil_img.convert("RGB").copy()
+    draw = ImageDraw.Draw(draw_img)
+
     indices_to_draw = [
         LEFT_EYE_TOP, LEFT_EYE_BOTTOM, LEFT_EYE_LEFT, LEFT_EYE_RIGHT,
         RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM, RIGHT_EYE_LEFT, RIGHT_EYE_RIGHT,
@@ -146,27 +133,29 @@ def compute_gaga_score(image):
     ]
     for idx in indices_to_draw:
         lm = landmarks[idx]
-        cx, cy = int(lm.x * w2), int(lm.y * h2)
-        cv2.circle(draw, (cx, cy), 3, (0, 255, 255), -1)
+        cx, cy = int(lm.x * w), int(lm.y * h)
+        r = max(2, int(w / 200))
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(0, 255, 255))
 
-    # Thin connections for eyes
+    # Eye connections
     left_pts = [landmarks[i] for i in [LEFT_EYE_LEFT, LEFT_EYE_TOP, LEFT_EYE_RIGHT, LEFT_EYE_BOTTOM]]
     for i in range(4):
-        p1 = (int(left_pts[i].x * w2), int(left_pts[i].y * h2))
-        p2 = (int(left_pts[(i + 1) % 4].x * w2), int(left_pts[(i + 1) % 4].y * h2))
-        cv2.line(draw, p1, p2, (0, 255, 255), 1)
+        p1 = (int(left_pts[i].x * w), int(left_pts[i].y * h))
+        p2 = (int(left_pts[(i + 1) % 4].x * w), int(left_pts[(i + 1) % 4].y * h))
+        draw.line([p1, p2], fill=(0, 255, 255), width=max(1, int(w / 400)))
+
     right_pts = [landmarks[i] for i in [RIGHT_EYE_LEFT, RIGHT_EYE_TOP, RIGHT_EYE_RIGHT, RIGHT_EYE_BOTTOM]]
     for i in range(4):
-        p1 = (int(right_pts[i].x * w2), int(right_pts[i].y * h2))
-        p2 = (int(right_pts[(i + 1) % 4].x * w2), int(right_pts[(i + 1) % 4].y * h2))
-        cv2.line(draw, p1, p2, (0, 255, 255), 1)
+        p1 = (int(right_pts[i].x * w), int(right_pts[i].y * h))
+        p2 = (int(right_pts[(i + 1) % 4].x * w), int(right_pts[(i + 1) % 4].y * h))
+        draw.line([p1, p2], fill=(0, 255, 255), width=max(1, int(w / 400)))
 
     # Mouth line
-    mp1 = (int(landmarks[UPPER_LIP].x * w2), int(landmarks[UPPER_LIP].y * h2))
-    mp2 = (int(landmarks[LOWER_LIP].x * w2), int(landmarks[LOWER_LIP].y * h2))
-    cv2.line(draw, mp1, mp2, (0, 255, 255), 2)
+    mp1 = (int(landmarks[UPPER_LIP].x * w), int(landmarks[UPPER_LIP].y * h))
+    mp2 = (int(landmarks[LOWER_LIP].x * w), int(landmarks[LOWER_LIP].y * h))
+    draw.line([mp1, mp2], fill=(0, 255, 255), width=max(2, int(w / 200)))
 
-    return score_pct, cv2.cvtColor(draw, cv2.COLOR_BGR2RGB)
+    return score_pct, draw_img
 
 
 # --- FILE UPLOADER ---
@@ -177,11 +166,9 @@ uploaded = st.file_uploader(
 
 if uploaded:
     pil = Image.open(uploaded).convert("RGB")
-    orig = np.array(pil)
-    bgr = cv2.cvtColor(orig, cv2.COLOR_RGB2BGR)
 
     with st.spinner("🧠 Analizando nivel de GAGA..."):
-        score, annotated = compute_gaga_score(bgr)
+        score, annotated = compute_gaga_score(pil)
 
     col1, col2 = st.columns(2)
 
@@ -202,43 +189,29 @@ if uploaded:
             "Probá con otra foto donde se vea bien tu cara."
         )
     else:
-        # --- Classification ---
         if score <= 20:
             label = "🧠 Totalmente Alerta"
             desc = "Mente al 100%, café al día. Hoy no te gana nadie."
-            bar_color = "normal"
         elif score <= 50:
             label = "✈️ Modo Avión Mental"
             desc = "Mente de viaje, distracción leve. Todavía hay esperanza."
-            bar_color = "normal"
         elif score <= 80:
             label = "⚠️ GAGA Activo — Peligro"
             desc = "Mirada fija en la pared, módem interno reiniciándose..."
-            bar_color = "warning"
         else:
             label = "🌌 GAGA Absoluto — Desconexión Espacial"
             desc = "El alma dejó el cuerpo. Si le hablás, solo responde: '¿Eh?'"
-            bar_color = "error"
 
         st.markdown(f'<div class="result-card">', unsafe_allow_html=True)
         st.subheader(f"GAGA-SCORE: {score}%")
         st.markdown(f"### {label}")
         st.markdown(f"_{desc}_")
-
-        if bar_color == "normal":
-            st.progress(score / 100.0)
-        elif bar_color == "warning":
-            st.progress(score / 100.0)
-        elif bar_color == "error":
-            st.progress(score / 100.0)
-
+        st.progress(score / 100.0)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # --- Download button ---
         if annotated is not None:
-            result_pil = Image.fromarray(annotated)
             buf = io.BytesIO()
-            result_pil.save(buf, format="PNG")
+            annotated.save(buf, format="PNG")
             buf.seek(0)
             st.download_button(
                 label="📥 Descargar veredicto como imagen",
