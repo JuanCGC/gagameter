@@ -4,6 +4,7 @@ import mediapipe as mp
 import random
 from PIL import Image, ImageDraw
 import io
+import os
 
 st.set_page_config(
     page_title="GAGAMETER",
@@ -43,11 +44,20 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- MediaPipe init ---
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5
+# --- MediaPipe init (new 0.10.x API) ---
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "face_landmarker.task")
+BaseOptions = mp.tasks.BaseOptions
+FaceLandmarker = mp.tasks.vision.FaceLandmarker
+FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
+VisionRunningMode = mp.tasks.vision.RunningMode
+
+options = FaceLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path=MODEL_PATH),
+    running_mode=VisionRunningMode.IMAGE,
+    num_faces=1,
+    min_face_detection_confidence=0.5,
 )
+landmarker = FaceLandmarker.create_from_options(options)
 
 # --- Landmark indices ---
 LEFT_EYE_TOP = 159
@@ -65,7 +75,6 @@ LOWER_LIP = 14
 
 
 def ear(landmarks, h, w, top, bottom, left, right):
-    """Eye Aspect Ratio simplificado."""
     p_top = np.array([landmarks[top].x * w, landmarks[top].y * h])
     p_bot = np.array([landmarks[bottom].x * w, landmarks[bottom].y * h])
     p_l = np.array([landmarks[left].x * w, landmarks[left].y * h])
@@ -77,7 +86,6 @@ def ear(landmarks, h, w, top, bottom, left, right):
 
 
 def mouth_ratio(landmarks, h, w):
-    """Distancia vertical labios / distancia de referencia (nariz-mentón)."""
     upper = np.array([landmarks[UPPER_LIP].x * w, landmarks[UPPER_LIP].y * h])
     lower = np.array([landmarks[LOWER_LIP].x * w, landmarks[LOWER_LIP].y * h])
     lip_dist = np.linalg.norm(upper - lower)
@@ -90,17 +98,17 @@ def mouth_ratio(landmarks, h, w):
 
 
 def compute_gaga_score(pil_img):
-    """Process PIL image with MediaPipe and return (score, annotated_pil)."""
     rgb = np.array(pil_img.convert("RGB"))
     h, w, _ = rgb.shape
-    results = face_mesh.process(rgb)
 
-    if not results.multi_face_landmarks:
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = landmarker.detect(mp_image)
+
+    if not result.face_landmarks:
         return None, None
 
-    landmarks = results.multi_face_landmarks[0].landmark
+    landmarks = result.face_landmarks[0]
 
-    # --- Eye metrics ---
     ear_left = ear(landmarks, h, w, LEFT_EYE_TOP, LEFT_EYE_BOTTOM, LEFT_EYE_LEFT, LEFT_EYE_RIGHT)
     ear_right = ear(landmarks, h, w, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM, RIGHT_EYE_LEFT, RIGHT_EYE_RIGHT)
     avg_ear = (ear_left + ear_right) / 2.0
@@ -109,20 +117,17 @@ def compute_gaga_score(pil_img):
     if avg_ear > 0.35:
         ear_score = 0.05
 
-    # --- Mouth metric ---
     mratio = mouth_ratio(landmarks, h, w)
     mouth_score = max(0.0, min(1.0, (mratio - 0.02) / 0.08))
 
-    # --- Weighted combination ---
     raw = ear_score * 0.55 + mouth_score * 0.35
 
-    # --- Random factor ±8% ---
     jitter = random.uniform(-0.08, 0.08)
     final = max(0.0, min(1.0, raw + jitter))
 
     score_pct = round(final * 100)
 
-    # --- Draw landmarks with PIL ---
+    # --- Draw landmarks ---
     draw_img = pil_img.convert("RGB").copy()
     draw = ImageDraw.Draw(draw_img)
 
@@ -137,7 +142,6 @@ def compute_gaga_score(pil_img):
         r = max(2, int(w / 200))
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(0, 255, 255))
 
-    # Eye connections
     left_pts = [landmarks[i] for i in [LEFT_EYE_LEFT, LEFT_EYE_TOP, LEFT_EYE_RIGHT, LEFT_EYE_BOTTOM]]
     for i in range(4):
         p1 = (int(left_pts[i].x * w), int(left_pts[i].y * h))
@@ -150,7 +154,6 @@ def compute_gaga_score(pil_img):
         p2 = (int(right_pts[(i + 1) % 4].x * w), int(right_pts[(i + 1) % 4].y * h))
         draw.line([p1, p2], fill=(0, 255, 255), width=max(1, int(w / 400)))
 
-    # Mouth line
     mp1 = (int(landmarks[UPPER_LIP].x * w), int(landmarks[UPPER_LIP].y * h))
     mp2 = (int(landmarks[LOWER_LIP].x * w), int(landmarks[LOWER_LIP].y * h))
     draw.line([mp1, mp2], fill=(0, 255, 255), width=max(2, int(w / 200)))
