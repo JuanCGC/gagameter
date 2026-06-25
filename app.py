@@ -1,3 +1,18 @@
+import sys
+import types
+
+# Mock cv2 before mediapipe imports it internally (drawing_utils.py)
+# This avoids the libGL.so.1 crash on headless environments like Streamlit Cloud
+_cv2_mock = types.ModuleType("cv2")
+_cv2_mock.__path__ = []
+_cv2_mock.__file__ = "cv2 (mock)"
+# Basic functions used by mediapipe's drawing_utils (never called by us)
+_cv2_mock.circle = lambda *a, **kw: None
+_cv2_mock.line = lambda *a, **kw: None
+_cv2_mock.rectangle = lambda *a, **kw: None
+_cv2_mock.arrowedLine = lambda *a, **kw: None
+sys.modules["cv2"] = _cv2_mock
+
 import streamlit as st
 import numpy as np
 import mediapipe as mp
